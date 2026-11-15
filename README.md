@@ -67,6 +67,8 @@
 ```
 保存后复制生成的 **模板ID**，填入仓库 Secret 的 `WECHAT_TEMPLATE_ID` 中即可。
 
+</details>
+
 ---
 
 
