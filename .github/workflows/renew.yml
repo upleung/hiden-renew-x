@@ -3,9 +3,9 @@ name: Auto Renew HidenCloud Pro
 on:
   workflow_dispatch: 
   schedule:
-    # 结合你的续期窗口，建议定在 UTC 周六 22:35 和周日 15:36
+    # 结合你的续期窗口，定在 UTC 周六 22:35 和周日 15:36
     - cron: '35 22 * * 6'
-    #- cron: '36 15 * * 0'
+    # - cron: '36 15 * * 0'
 
 permissions:
   actions: write
@@ -44,6 +44,7 @@ jobs:
           
       - name: 🚀 运行续期脚本
         env:
+          DISCORD_TOKEN: ${{ secrets.DISCORD_TOKEN }}   # 👈 核心修复：将 GitHub Secret 映射到容器环境变量
           EMAIL: ${{ secrets.EMAIL }}
           PASSWORD: ${{ secrets.PASSWORD }}
           COOKIE_VALUE: ${{ secrets.COOKIE_VALUE }}
