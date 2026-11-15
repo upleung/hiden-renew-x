@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
   schedule:
     # 每周六 UTC 12:00 (北京时间周六 20:00) 自动检测一次
-    - cron: '35 12 * * 6'
+    - cron: '0 12 * * 6'
 
 permissions:
   contents: write
@@ -27,7 +27,7 @@ jobs:
         with:
           python-version: '3.13'
 
-      - name: 🔄 3. 拉取上游最新代码并自动注入微信/TG双推及环境变量补丁
+      - name: 🔄 3. 拉取上游最新代码并自动注入隐私脱敏与双推补丁
         run: |
           curl -sSL https://raw.githubusercontent.com/eooce/Auto-Renew-HidenCloud/main/app.py -o /tmp/upstream_app.py
           curl -sSL https://raw.githubusercontent.com/eooce/Auto-Renew-HidenCloud/main/.github/workflows/renew.yml -o /tmp/upstream_renew.yml
@@ -42,6 +42,35 @@ jobs:
 
           with open("/tmp/upstream_app.py", "r", encoding="utf-8") as f:
               code = f.read()
+
+          # ---------------------------------------------------------
+          # 补丁 0：接管 log() 函数，植入全局敏感信息正则脱敏网关
+          # 自动隐藏：client_id、state、code、Server ID、Invoice UUID、出口IP
+          # ---------------------------------------------------------
+          safe_log_func = '''def log(message):
+              msg = str(message)
+              # 1. 隐藏 Discord OAuth client_id / state / code / token 参数
+              msg = re.sub(r'(client_id=)[^&\\s]+', r'\\1***', msg)
+              msg = re.sub(r'([?&](?:state|code|token|access_token)=)[^&\\s]+', r'\\1***', msg)
+              # 2. 隐藏 Server ID 及服务管理路径中的数字 ID
+              msg = re.sub(r'(Server ID:\\s*)#?\\d+', r'\\1***', msg, flags=re.IGNORECASE)
+              msg = re.sub(r'(/service/)\\d+', r'\\1***', msg)
+              # 3. 隐藏账单 Invoice 专属 UUID 路径
+              msg = re.sub(r'(/payment/invoice/)[^\\s/?#]+', r'\\1***', msg)
+              # 4. 兜底隐藏除 127.0.0.1 以外的所有公网 IPv4 地址
+              msg = re.sub(r'\\b(?!127\\.0\\.0\\.1\\b)(?:\\d{1,3}\\.){3}\\d{1,3}\\b', '***', msg)
+              print(f"[{time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime(time.time() + 8 * 3600))}] {msg}", flush=True)
+          '''
+
+          code, n_log = re.subn(
+              r'def log\(message\):\s*\n\s*print\([^\n]+\)',
+              lambda m: safe_log_func,
+              code,
+              count=1
+          )
+          if n_log == 0:
+              print("❌ 未找到 log(message) 函数定义，注入脱敏网关失败")
+              sys.exit(1)
 
           # ---------------------------------------------------------
           # 补丁 1：注入微信推送环境变量 (WECHAT_APPID ~ WECHAT_OPENID2)
@@ -81,7 +110,7 @@ jobs:
           )
 
           wechat_func_block = '''def send_wechat_notification(status, old_due="未知", new_due="未知", current_ip="未知", *args, **kwargs):
-              """使用微信官方测试号直连推送（支持双微信号，显示 Hiden🌥）"""
+              """使用微信官方测试号直连推送（支持双微信号，显示 Hiden🌥，隐藏 OpenID 尾号）"""
               if not all([WECHAT_APPID, WECHAT_APPSECRET, WECHAT_TEMPLATE_ID]) or not (WECHAT_OPENID or WECHAT_OPENID2):
                   log("⚠️ 微信直连推送参数未配置齐全，跳过推送")
                   return False
@@ -115,7 +144,7 @@ jobs:
                   openids = [oid for oid in [WECHAT_OPENID, WECHAT_OPENID2] if oid]
                   success_count = 0
 
-                  for openid in openids:
+                  for idx, openid in enumerate(openids, 1):
                       push_url = f"https://api.weixin.qq.com/cgi-bin/message/template/send?access_token={access_token}"
                       payload = {
                           "touser": openid,
@@ -127,10 +156,10 @@ jobs:
                       }
                       push_resp = requests.post(push_url, json=payload, timeout=10).json()
                       if push_resp.get("errcode") == 0:
-                          log(f"✅ 微信官方直连推送成功 (尾号 {openid[-4:]})")
+                          log(f"✅ 微信官方直连推送成功 (微信 #{idx})")
                           success_count += 1
                       else:
-                          log(f"❌ 微信直连推送失败 (尾号 {openid[-4:]}): {push_resp}")
+                          log(f"❌ 微信直连推送失败 (微信 #{idx}): errcode={push_resp.get('errcode')}")
 
                   return success_count > 0
               except Exception as e:
@@ -200,7 +229,6 @@ jobs:
               with open(local_yml_path, "r", encoding="utf-8") as f:
                   loc_yml = f.read()
 
-              # 提取上游所有的 KEY: ${{ secrets.KEY }} 映射
               up_secrets = re.findall(r'^\s*([A-Z0-9_]+)\s*:\s*\$\{\{\s*secrets\.([A-Z0-9_]+)\s*\}\}', up_yml, flags=re.MULTILINE)
               for env_key, secret_name in up_secrets:
                   if env_key in ("GITHUB_TOKEN", "NODE_LINK"):
@@ -218,7 +246,7 @@ jobs:
               with open(local_yml_path, "w", encoding="utf-8") as f:
                   f.write(loc_yml)
 
-          print("✅ 上游代码同步及补丁注入全部完成！")
+          print("✅ 上游代码同步、隐私脱敏网关及双推补丁注入全部完成！")
           EOF
 
           python3 -m py_compile app.py
@@ -230,12 +258,12 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
           if git diff --quiet app.py .github/workflows/renew.yml; then
-            echo "ℹ️ 上游代码无变动，无需提交。"
+            echo "ℹ️ 代码无变动，无需提交。"
           else
             git add app.py .github/workflows/renew.yml
-            git commit -m "🔄 Auto Sync upstream & preserve WeChat/TG push ($(TZ=Asia/Shanghai date +'%Y-%m-%d %H:%M'))"
+            git commit -m "🔒 Auto Sync & apply privacy log masking ($(TZ=Asia/Shanghai date +'%Y-%m-%d %H:%M'))"
             git push origin main
-            echo "🎉 已成功同步上游更新并推送到仓库！"
+            echo "🎉 已成功更新脱敏版 app.py 并推送到仓库！"
           fi
 
       - name: 🧹 5. 清理旧的同步运行记录
