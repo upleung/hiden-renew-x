@@ -1,10 +1,10 @@
 name: Sync Upstream HidenCloud (Keep WeChat & TG)
 
 on:
-  workflow_dispatch: # 支持在 Actions 面板手动点击立即同步
+  workflow_dispatch:
   schedule:
     # 每周六 UTC 12:00 (北京时间周六 20:00) 自动检测一次
-    - cron: '35 12 * * 6'
+    - cron: '0 12 * * 6'
 
 permissions:
   contents: write
@@ -27,19 +27,18 @@ jobs:
         with:
           python-version: '3.13'
 
-      - name: 🔄 3. 拉取上游最新 app.py 并自动注入微信/TG双推补丁
+      - name: 🔄 3. 拉取上游最新代码并自动注入微信/TG双推及环境变量补丁
         run: |
-          # 下载上游 eooce/Auto-Renew-HidenCloud 最新的 app.py
           curl -sSL https://raw.githubusercontent.com/eooce/Auto-Renew-HidenCloud/main/app.py -o /tmp/upstream_app.py
+          curl -sSL https://raw.githubusercontent.com/eooce/Auto-Renew-HidenCloud/main/.github/workflows/renew.yml -o /tmp/upstream_renew.yml
           
           if [ ! -s /tmp/upstream_app.py ]; then
             echo "❌ 下载上游 app.py 失败或文件为空"
             exit 1
           fi
 
-          # 运行 Python 自动缝合器：保留上游最新破盾逻辑，同时注入微信/TG双通道推送
           python3 - << 'EOF'
-          import re, sys
+          import re, sys, os
 
           with open("/tmp/upstream_app.py", "r", encoding="utf-8") as f:
               code = f.read()
@@ -166,7 +165,7 @@ jobs:
           )
 
           # ---------------------------------------------------------
-          # 补丁 5：增强 Renew 按钮底层 DOM 穿透点击（防止透明层拦截）
+          # 补丁 5：增强 Renew 按钮底层 DOM 穿透点击
           # ---------------------------------------------------------
           def inject_dom_click(m):
               indent = m.group(1)
@@ -191,10 +190,37 @@ jobs:
           with open("app.py", "w", encoding="utf-8") as f:
               f.write(code)
 
-          print("✅ 上游 app.py 同步并注入微信/TG双通道补丁完成！")
+          # ---------------------------------------------------------
+          # 补丁 6：自动检测上游 renew.yml 新增的环境变量并补齐到本地 renew.yml
+          # ---------------------------------------------------------
+          local_yml_path = ".github/workflows/renew.yml"
+          if os.path.exists("/tmp/upstream_renew.yml") and os.path.exists(local_yml_path):
+              with open("/tmp/upstream_renew.yml", "r", encoding="utf-8") as f:
+                  up_yml = f.read()
+              with open(local_yml_path, "r", encoding="utf-8") as f:
+                  loc_yml = f.read()
+
+              # 提取上游所有的 KEY: ${{ secrets.KEY }} 映射
+              up_secrets = re.findall(r'^\s*([A-Z0-9_]+)\s*:\s*\$\{\{\s*secrets\.([A-Z0-9_]+)\s*\}\}', up_yml, flags=re.MULTILINE)
+              for env_key, secret_name in up_secrets:
+                  if env_key in ("GITHUB_TOKEN", "NODE_LINK"):
+                      continue
+                  if not re.search(rf'^\s*{env_key}\s*:', loc_yml, flags=re.MULTILINE):
+                      loc_yml = re.sub(
+                          r'(^\s*EMAIL\s*:\s*\$\{\{\s*secrets\.EMAIL\s*\}\})',
+                          f'          {env_key}: ${{{{ secrets.{secret_name} }}}}\n\\1',
+                          loc_yml,
+                          count=1,
+                          flags=re.MULTILINE
+                      )
+                      print(f"✅ 自动向 renew.yml 补充上游新增环境变量: {env_key}")
+
+              with open(local_yml_path, "w", encoding="utf-8") as f:
+                  f.write(loc_yml)
+
+          print("✅ 上游代码同步及补丁注入全部完成！")
           EOF
 
-          # 语法自检：确保生成的 app.py 没有任何 Python 语法错误
           python3 -m py_compile app.py
           echo "✅ Python 语法自检通过！"
 
@@ -203,11 +229,11 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          if git diff --quiet app.py; then
-            echo "ℹ️ 上游代码无变动（或当前已是最新双推补丁版），无需提交。"
+          if git diff --quiet app.py .github/workflows/renew.yml; then
+            echo "ℹ️ 上游代码无变动，无需提交。"
           else
-            git add app.py
-            git commit -m "🔄 Auto Sync upstream app.py & preserve WeChat/TG push ($(TZ=Asia/Shanghai date +'%Y-%m-%d %H:%M'))"
+            git add app.py .github/workflows/renew.yml
+            git commit -m "🔄 Auto Sync upstream & preserve WeChat/TG push ($(TZ=Asia/Shanghai date +'%Y-%m-%d %H:%M'))"
             git push origin main
             echo "🎉 已成功同步上游更新并推送到仓库！"
           fi
