@@ -1,0 +1,221 @@
+name: Sync Upstream HidenCloud (Keep WeChat & TG)
+
+on:
+  workflow_dispatch: # 支持在 Actions 面板手动点击立即同步
+  schedule:
+    # 每周六 UTC 12:00 (北京时间周六 20:00) 自动检测一次，刚好在周六晚续期任务运行前完成更新
+    - cron: '0 12 * * 6'
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  sync-and-patch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: 📥 1. 检出当前仓库代码
+        uses: actions/checkout@v6
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          persist-credentials: true
+
+      - name: ⚙ 2. 设置 Python 环境
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+
+      - name: 🔄 3. 拉取上游最新 app.py 并自动注入微信/TG双推补丁
+        run: |
+          # 下载上游 eooce/Auto-Renew-HidenCloud 最新的 app.py
+          curl -sSL https://raw.githubusercontent.com/eooce/Auto-Renew-HidenCloud/main/app.py -o /tmp/upstream_app.py
+          
+          # Basic check: 确保下载成功且文件非空
+          if [ ! -s /tmp/upstream_app.py ]; then
+            echo "❌ 下载上游 app.py 失败或文件为空"
+            exit 1
+          fi
+
+          # 运行 Python 自动缝合器：保留上游最新破盾逻辑，同时注入微信/TG双通道推送
+          python3 - << 'EOF'
+          import re, sys
+
+          with open("/tmp/upstream_app.py", "r", encoding="utf-8") as f:
+              code = f.read()
+
+          # ---------------------------------------------------------
+          # 补丁 1：注入微信推送环境变量 (WECHAT_APPID ~ WECHAT_OPENID2)
+          # ---------------------------------------------------------
+          wechat_env_block = (
+              "\n# --- 微信原生推送配置 (自动同步注入保留) ---\n"
+              "WECHAT_APPID       = os.environ.get('WECHAT_APPID') or \"\"\n"
+              "WECHAT_APPSECRET   = os.environ.get('WECHAT_APPSECRET') or \"\"\n"
+              "WECHAT_OPENID      = os.environ.get('WECHAT_OPENID') or \"\"\n"
+              "WECHAT_OPENID2     = os.environ.get('WECHAT_OPENID2') or \"\"\n"
+              "WECHAT_TEMPLATE_ID = os.environ.get('WECHAT_TEMPLATE_ID') or \"\"\n"
+          )
+          if "WECHAT_APPID" not in code:
+              code, n = re.subn(
+                  r'(TG_BOT_TOKEN\s*=\s*[^\n]+\n)',
+                  r'\1' + wechat_env_block,
+                  code,
+                  count=1
+              )
+              if n == 0:
+                  print("❌ 未找到 TG_BOT_TOKEN 锚点，注入环境变量失败")
+                  sys.exit(1)
+
+          # ---------------------------------------------------------
+          # 补丁 2：将默认代理回退地址统一为 socks5://127.0.0.1:1080
+          # ---------------------------------------------------------
+          code = code.replace('"http://127.0.0.1:1081"', '"socks5://127.0.0.1:1080"')
+
+          # ---------------------------------------------------------
+          # 补丁 3：修复上游 send_telegram_notification 默认参数并注入微信推送函数
+          # ---------------------------------------------------------
+          code = re.sub(
+              r'def send_telegram_notification\([^)]*\):',
+              'def send_telegram_notification(status, old_due="未知", new_due="未知", current_ip="未知", *args, **kwargs):',
+              code,
+              count=1
+          )
+
+          wechat_func_block = '''def send_wechat_notification(status, old_due="未知", new_due="未知", current_ip="未知", *args, **kwargs):
+              """使用微信官方测试号直连推送（支持双微信号，显示 Hiden🌥）"""
+              if not all([WECHAT_APPID, WECHAT_APPSECRET, WECHAT_TEMPLATE_ID]) or not (WECHAT_OPENID or WECHAT_OPENID2):
+                  log("⚠️ 微信直连推送参数未配置齐全，跳过推送")
+                  return False
+
+              now = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(time.time() + 8 * 3600))
+              if '@' in EMAIL:
+                  name, domain = EMAIL.split('@', 1)
+                  masked_email = f"{name[:2]}****{name[-2:]}@{domain}" if len(name) > 4 else f"{name}@{domain}"
+              else:
+                  masked_email = EMAIL[:2] + '****' if EMAIL else "未配置"
+
+              clean_status = str(status).replace("✅ ", "").replace("❌ ", "").replace("⏳ ", "")
+              wechat_title = f"Hiden🌥 {clean_status}"
+
+              wechat_content = (
+                  f"账号: {masked_email}\\n"
+                  f"续期前: {old_due}\\n"
+                  f"续期后: {new_due}\\n"
+                  f"IP: {current_ip}\\n"
+                  f"时间: {now}"
+              )
+
+              try:
+                  token_url = f"https://api.weixin.qq.com/cgi-bin/token?grant_type=client_credential&appid={WECHAT_APPID}&secret={WECHAT_APPSECRET}"
+                  token_resp = requests.get(token_url, timeout=10).json()
+                  access_token = token_resp.get("access_token")
+                  if not access_token:
+                      log(f"❌ 获取微信 Access Token 失败")
+                      return False
+
+                  openids = [oid for oid in [WECHAT_OPENID, WECHAT_OPENID2] if oid]
+                  success_count = 0
+
+                  for openid in openids:
+                      push_url = f"https://api.weixin.qq.com/cgi-bin/message/template/send?access_token={access_token}"
+                      payload = {
+                          "touser": openid,
+                          "template_id": WECHAT_TEMPLATE_ID,
+                          "data": {
+                              "title": {"value": wechat_title, "color": "#173177"},
+                              "content": {"value": wechat_content, "color": "#333333"}
+                          }
+                      }
+                      push_resp = requests.post(push_url, json=payload, timeout=10).json()
+                      if push_resp.get("errcode") == 0:
+                          log(f"✅ 微信官方直连推送成功 (尾号 {openid[-4:]})")
+                          success_count += 1
+                      else:
+                          log(f"❌ 微信直连推送失败 (尾号 {openid[-4:]}): {push_resp}")
+
+                  return success_count > 0
+              except Exception as e:
+                  log(f"❌ 微信直连推送请求异常: {e}")
+                  return False
+
+          '''
+
+          if "def send_wechat_notification" not in code:
+              code, n = re.subn(
+                  r'(def send_telegram_notification\()',
+                  wechat_func_block + r'\1',
+                  code,
+                  count=1
+              )
+              if n == 0:
+                  print("❌ 未找到 send_telegram_notification 函数定义，注入失败")
+                  sys.exit(1)
+
+          # ---------------------------------------------------------
+          # 补丁 4：在所有调用 send_telegram_notification 的地方同步调用微信推送
+          # ---------------------------------------------------------
+          code = re.sub(
+              r'^([ \t]*)send_telegram_notification\((.+?)\)(.*)$',
+              r'\1send_telegram_notification(\2)\3\n\1send_wechat_notification(\2)',
+              code,
+              flags=re.MULTILINE
+          )
+
+          # ---------------------------------------------------------
+          # 补丁 5：增强 Renew 按钮底层 DOM 穿透点击（防止透明层拦截）
+          # ---------------------------------------------------------
+          code = re.sub(
+              r'^([ \t]*)renew_btn\.click\(\)\s*$',
+              (
+                  r'\1try:\n'
+                  r'\1    if i == 0:\n'
+                  r'\1        renew_btn.click(timeout=5000)\n'
+                  r'\1    else:\n'
+                  r'\1        log("⚡ 使用 DOM 底层穿透点击 Renew...")\n'
+                  r'\1        renew_btn.evaluate("node => node.click()")\n'
+                  r'\1except Exception:\n'
+                  r'\1    renew_btn.evaluate("node => node.click()")'
+              ),
+              code,
+              flags=re.MULTILINE
+          )
+
+          with open("app.py", "w", encoding="utf-8") as f:
+              f.write(code)
+
+          print("✅ 上游 app.py 同步并注入微信/TG双通道补丁完成！")
+          EOF
+
+          # 语法自检：确保生成的 app.py 没有任何 Python 语法错误
+          python3 -m py_compile app.py
+          echo "✅ Python 语法自检通过！"
+
+      - name: 📤 4. 检测变动并提交更新
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          if git diff --quiet app.py; then
+            echo "ℹ️ 上游代码无变动（或当前已是最新双推补丁版），无需提交。"
+          else
+            git add app.py
+            git commit -m "🔄 Auto Sync upstream app.py & preserve WeChat/TG push ($(TZ=Asia/Shanghai date +'%Y-%m-%d %H:%M'))"
+            git push origin main
+            echo "🎉 已成功同步上游更新并推送到仓库！"
+          fi
+
+      - name: 🧹 5. 清理旧的同步运行记录
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          runs=$(gh run list --workflow="${{ github.workflow }}" --limit=100 --json databaseId --jq '.[].databaseId')
+          count=0
+          for run_id in $runs; do
+            count=$((count + 1))
+            if [ $count -gt 1 ]; then
+              echo "删除旧的同步记录: $run_id"
+              gh run delete $run_id || true
+            fi
+          done
