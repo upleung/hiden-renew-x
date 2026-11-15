@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
   schedule:
     # 每周六 UTC 12:00 (北京时间周六 20:00) 自动检测一次
-    - cron: '35 12 * * 6'
+    - cron: '0 12 * * 6'
 
 permissions:
   contents: write
@@ -221,6 +221,7 @@ jobs:
 
           # ---------------------------------------------------------
           # 补丁 6：自动检测上游 renew.yml 新增的环境变量并补齐到本地 renew.yml
+          # 注意：拆开 '$' + '{{' 以防止 GitHub YAML 预解析器误判报错
           # ---------------------------------------------------------
           local_yml_path = ".github/workflows/renew.yml"
           if os.path.exists("/tmp/upstream_renew.yml") and os.path.exists(local_yml_path):
@@ -234,9 +235,10 @@ jobs:
                   if env_key in ("GITHUB_TOKEN", "NODE_LINK"):
                       continue
                   if not re.search(rf'^\s*{env_key}\s*:', loc_yml, flags=re.MULTILINE):
+                      gh_secret_expr = "$" + "{{ secrets." + secret_name + " }}"
                       loc_yml = re.sub(
                           r'(^\s*EMAIL\s*:\s*\$\{\{\s*secrets\.EMAIL\s*\}\})',
-                          f'          {env_key}: ${{{{ secrets.{secret_name} }}}}\n\\1',
+                          lambda m: f"          {env_key}: {gh_secret_expr}\n{m.group(1)}",
                           loc_yml,
                           count=1,
                           flags=re.MULTILINE
@@ -271,7 +273,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          runs=$(gh run list --workflow="${{ github.workflow }}" --limit=100 --json databaseId --jq '.[].databaseId')
+          runs=$(gh run list --workflow="sync-upstream.yml" --limit=100 --json databaseId --jq '.[].databaseId')
           count=0
           for run_id in $runs; do
             count=$((count + 1))
