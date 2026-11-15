@@ -5,7 +5,7 @@ on:
   schedule:
     # 结合你的续期窗口，定在 UTC 周六 22:35 和周日 15:36
     - cron: '35 22 * * 6'
-    # - cron: '36 15 * * 0'
+  # - cron: '36 15 * * 0'
 
 permissions:
   actions: write
@@ -44,7 +44,10 @@ jobs:
           
       - name: 🚀 运行续期脚本
         env:
-          DISCORD_TOKEN: ${{ secrets.DISCORD_TOKEN }}   # 👈 核心修复：将 GitHub Secret 映射到容器环境变量
+          # 核心升级：将仓库所有 Secrets 动态打包透传，未来上游新增任何变量均自动生效
+          ALL_SECRETS: ${{ toJSON(secrets) }}
+          DISCORD_TOKEN: ${{ secrets.DISCORD_TOKEN }}
+          REGION: ${{ secrets.REGION }}
           EMAIL: ${{ secrets.EMAIL }}
           PASSWORD: ${{ secrets.PASSWORD }}
           COOKIE_VALUE: ${{ secrets.COOKIE_VALUE }}
@@ -61,7 +64,6 @@ jobs:
           # 提前获取出口 IP 并通知 GitHub Actions 进行日志脱敏 (将 IP 隐藏为 ***)
           EXPORT_IP=$(curl -s --socks5-hostname 127.0.0.1:1080 https://api.ipify.org || curl -s https://api.ipify.org)         
           
-          # 验证获取到的内容是否为合法的 IPV4 格式，防止获取失败导致将空字符串或错误提示作为掩码
           if [[ $EXPORT_IP =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             echo "::add-mask::$EXPORT_IP"
           fi
@@ -96,7 +98,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          runs=$(gh run list --workflow="${{ github.workflow }}" --limit=100 --json databaseId --jq '.[].databaseId')
+          runs=$(gh run list --workflow="renew.yml" --limit=100 --json databaseId --jq '.[].databaseId')
           count=0
           for run_id in $runs; do
             count=$((count + 1))
