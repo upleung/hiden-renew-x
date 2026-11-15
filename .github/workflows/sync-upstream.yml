@@ -1,4 +1,4 @@
-name: Sync Upstream HidenCloud (Keep WeChat & TG)
+name: Sync Upstream Hiden (Keep WeChat & TG)
 
 on:
   workflow_dispatch:
