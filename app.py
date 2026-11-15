@@ -2,6 +2,14 @@
 # -*- coding: utf-8 -*-
 
 import os,re,sys,time,random,requests,urllib.parse
+import json as _json
+try:
+    for _k, _v in _json.loads(os.environ.get('ALL_SECRETS') or '{}').items():
+        if _v and not os.environ.get(_k):
+            os.environ[_k] = str(_v)
+except Exception:
+    pass
+
 try:
     from patchright.sync_api import sync_playwright
     USING_PATCHRIGHT = True
@@ -48,7 +56,19 @@ else:
 
 # 日志
 def log(message):
-    print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {message}", flush=True)
+    msg = str(message)
+    # 1. 隐藏 Discord OAuth client_id / state / code / token 参数
+    msg = re.sub(r'(client_id=)[^&\s]+', r'\1***', msg)
+    msg = re.sub(r'([?&](?:state|code|token|access_token)=)[^&\s]+', r'\1***', msg)
+    # 2. 隐藏 Server ID 及服务管理路径中的数字 ID
+    msg = re.sub(r'(Server ID:\s*)#?\d+', r'\1***', msg, flags=re.IGNORECASE)
+    msg = re.sub(r'(/service/)\d+', r'\1***', msg)
+    # 3. 隐藏账单 Invoice 专属 UUID 路径
+    msg = re.sub(r'(/payment/invoice/)[^\s/?#]+', r'\1***', msg)
+    # 4. 兜底隐藏除 127.0.0.1 以外的所有公网 IPv4 地址
+    msg = re.sub(r'\b(?!127\.0\.0\.1\b)(?:\d{1,3}\.){3}\d{1,3}\b', '***', msg)
+    print(f"[{time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime(time.time() + 8 * 3600))}] {msg}", flush=True)
+
 
 STEALTH_JS = """
 // 注意：使用真实 Chrome（channel="chrome"）时不要覆盖 window.chrome，
@@ -72,7 +92,7 @@ def get_current_ip(proxy_server=None):
         return "获取失败"
 
 def send_wechat_notification(status, old_due="未知", new_due="未知", current_ip="未知", *args, **kwargs):
-    """使用微信官方测试号直连推送（支持双微信号，显示 Hiden🌥）"""
+    """使用微信官方测试号直连推送（支持双微信号，显示 Hiden🌥，隐藏 OpenID 尾号）"""
     if not all([WECHAT_APPID, WECHAT_APPSECRET, WECHAT_TEMPLATE_ID]) or not (WECHAT_OPENID or WECHAT_OPENID2):
         log("⚠️ 微信直连推送参数未配置齐全，跳过推送")
         return False
@@ -106,7 +126,7 @@ def send_wechat_notification(status, old_due="未知", new_due="未知", current
         openids = [oid for oid in [WECHAT_OPENID, WECHAT_OPENID2] if oid]
         success_count = 0
 
-        for openid in openids:
+        for idx, openid in enumerate(openids, 1):
             push_url = f"https://api.weixin.qq.com/cgi-bin/message/template/send?access_token={access_token}"
             payload = {
                 "touser": openid,
@@ -118,10 +138,10 @@ def send_wechat_notification(status, old_due="未知", new_due="未知", current
             }
             push_resp = requests.post(push_url, json=payload, timeout=10).json()
             if push_resp.get("errcode") == 0:
-                log(f"✅ 微信官方直连推送成功 (尾号 {openid[-4:]})")
+                log(f"✅ 微信官方直连推送成功 (微信 #{idx})")
                 success_count += 1
             else:
-                log(f"❌ 微信直连推送失败 (尾号 {openid[-4:]}): {push_resp}")
+                log(f"❌ 微信直连推送失败 (微信 #{idx}): errcode={push_resp.get('errcode')}")
 
         return success_count > 0
     except Exception as e:
