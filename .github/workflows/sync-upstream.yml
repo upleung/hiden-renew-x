@@ -3,8 +3,8 @@ name: Sync Upstream HidenCloud (Keep WeChat & TG)
 on:
   workflow_dispatch: # 支持在 Actions 面板手动点击立即同步
   schedule:
-    # 每周六 UTC 12:00 (北京时间周六 20:00) 自动检测一次，刚好在周六晚续期任务运行前完成更新
-    - cron: '0 12 * * 6'
+    # 每周六 UTC 12:00 (北京时间周六 20:00) 自动检测一次
+    - cron: '35 12 * * 6'
 
 permissions:
   contents: write
@@ -32,7 +32,6 @@ jobs:
           # 下载上游 eooce/Auto-Renew-HidenCloud 最新的 app.py
           curl -sSL https://raw.githubusercontent.com/eooce/Auto-Renew-HidenCloud/main/app.py -o /tmp/upstream_app.py
           
-          # Basic check: 确保下载成功且文件非空
           if [ ! -s /tmp/upstream_app.py ]; then
             echo "❌ 下载上游 app.py 失败或文件为空"
             exit 1
@@ -59,7 +58,7 @@ jobs:
           if "WECHAT_APPID" not in code:
               code, n = re.subn(
                   r'(TG_BOT_TOKEN\s*=\s*[^\n]+\n)',
-                  r'\1' + wechat_env_block,
+                  lambda m: m.group(1) + wechat_env_block,
                   code,
                   count=1
               )
@@ -98,20 +97,20 @@ jobs:
               clean_status = str(status).replace("✅ ", "").replace("❌ ", "").replace("⏳ ", "")
               wechat_title = f"Hiden🌥 {clean_status}"
 
-              wechat_content = (
-                  f"账号: {masked_email}\\n"
-                  f"续期前: {old_due}\\n"
-                  f"续期后: {new_due}\\n"
-                  f"IP: {current_ip}\\n"
+              wechat_content = chr(10).join([
+                  f"账号: {masked_email}",
+                  f"续期前: {old_due}",
+                  f"续期后: {new_due}",
+                  f"IP: {current_ip}",
                   f"时间: {now}"
-              )
+              ])
 
               try:
                   token_url = f"https://api.weixin.qq.com/cgi-bin/token?grant_type=client_credential&appid={WECHAT_APPID}&secret={WECHAT_APPSECRET}"
                   token_resp = requests.get(token_url, timeout=10).json()
                   access_token = token_resp.get("access_token")
                   if not access_token:
-                      log(f"❌ 获取微信 Access Token 失败")
+                      log("❌ 获取微信 Access Token 失败")
                       return False
 
                   openids = [oid for oid in [WECHAT_OPENID, WECHAT_OPENID2] if oid]
@@ -144,7 +143,7 @@ jobs:
           if "def send_wechat_notification" not in code:
               code, n = re.subn(
                   r'(def send_telegram_notification\()',
-                  wechat_func_block + r'\1',
+                  lambda m: wechat_func_block + m.group(1),
                   code,
                   count=1
               )
@@ -155,9 +154,13 @@ jobs:
           # ---------------------------------------------------------
           # 补丁 4：在所有调用 send_telegram_notification 的地方同步调用微信推送
           # ---------------------------------------------------------
+          def inject_wechat_call(m):
+              indent, args, comment = m.group(1), m.group(2), m.group(3)
+              return f"{indent}send_telegram_notification({args}){comment}\n{indent}send_wechat_notification({args})"
+
           code = re.sub(
-              r'^([ \t]*)send_telegram_notification\((.+?)\)(.*)$',
-              r'\1send_telegram_notification(\2)\3\n\1send_wechat_notification(\2)',
+              r'^([ \t]*)send_telegram_notification\(([^)\n]+)\)(.*)$',
+              inject_wechat_call,
               code,
               flags=re.MULTILINE
           )
@@ -165,18 +168,22 @@ jobs:
           # ---------------------------------------------------------
           # 补丁 5：增强 Renew 按钮底层 DOM 穿透点击（防止透明层拦截）
           # ---------------------------------------------------------
+          def inject_dom_click(m):
+              indent = m.group(1)
+              return (
+                  f'{indent}try:\n'
+                  f'{indent}    if i == 0:\n'
+                  f'{indent}        renew_btn.click(timeout=5000)\n'
+                  f'{indent}    else:\n'
+                  f'{indent}        log("⚡ 使用 DOM 底层穿透点击 Renew...")\n'
+                  f'{indent}        renew_btn.evaluate("node => node.click()")\n'
+                  f'{indent}except Exception:\n'
+                  f'{indent}    renew_btn.evaluate("node => node.click()")'
+              )
+
           code = re.sub(
               r'^([ \t]*)renew_btn\.click\(\)\s*$',
-              (
-                  r'\1try:\n'
-                  r'\1    if i == 0:\n'
-                  r'\1        renew_btn.click(timeout=5000)\n'
-                  r'\1    else:\n'
-                  r'\1        log("⚡ 使用 DOM 底层穿透点击 Renew...")\n'
-                  r'\1        renew_btn.evaluate("node => node.click()")\n'
-                  r'\1except Exception:\n'
-                  r'\1    renew_btn.evaluate("node => node.click()")'
-              ),
+              inject_dom_click,
               code,
               flags=re.MULTILINE
           )
